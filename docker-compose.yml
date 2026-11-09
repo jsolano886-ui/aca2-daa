@@ -1,0 +1,75 @@
+# ACA 2 - Simulación local de la plataforma de preventa de DAA (Distribuidora Andina de Alimentos)
+# Replica parcial de la fase 2 del diseño del ACA 1: API de pedidos en contenedor + base de datos,
+# detrás de una puerta de enlace (rol análogo a WSO2 API Manager) y con redes segmentadas.
+# Uso:  docker compose up -d --build   |   docker compose down   (conserva los datos)
+name: daa-sim
+
+services:
+  gateway:                                  # puerta de enlace: único servicio publicado al anfitrión
+    image: nginx:1.27-alpine
+    container_name: daa_gw
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${GW_PUERTO:-8080}:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro   # bind mount de configuración
+    networks:
+      - daa_front
+
+  api:                                      # contenedor 1: aplicación (Flask + Gunicorn)
+    build: ./api
+    image: daa-api:1.0
+    container_name: daa_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy          # espera a que PostgreSQL acepte conexiones
+    environment:
+      DB_HOST: db                           # DNS interno de Docker: nombre del servicio
+      DB_PORT: "5432"
+      DB_NAME: ${POSTGRES_DB}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./logs:/app/logs                    # bind mount: registros visibles en el anfitrión
+    networks:
+      - daa_front
+      - daa_back
+
+  db:                                       # contenedor 2: base de datos (PostgreSQL)
+    image: postgres:16-alpine
+    container_name: daa_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - daa_pgdata:/var/lib/postgresql/data         # volumen nombrado: persistencia
+      - ./db/init:/docker-entrypoint-initdb.d:ro    # bind mount: esquema y datos iniciales
+    networks:
+      - daa_back                                    # solo en la red de datos (sin puertos publicados)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+networks:
+  daa_front:                                # análoga a la VLAN de servicios/usuarios
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.10.0/24
+  daa_back:                                 # análoga a la VLAN de datos: sin salida al exterior
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.20.0/24
+
+volumes:
+  daa_pgdata:
